@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>RFQ Ingestion Dashboard</title>
+<style>
+  :root {
+    --border: #d9d9d9;
+    --bg: #fafafa;
+    --accent: #2452b3;
+    --warn-bg: #fff4e5;
+    --warn-border: #e0a83e;
+    --bad-bg: #fdeaea;
+    --bad-text: #a02020;
+    --good-bg: #e8f5e9;
+    --good-text: #256029;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    margin: 0;
+    background: var(--bg);
+    color: #1a1a1a;
+  }
+  header {
+    padding: 20px 28px;
+    border-bottom: 1px solid var(--border);
+    background: #fff;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  header h1 { font-size: 20px; margin: 0; }
+  header p { margin: 2px 0 0; color: #666; font-size: 13px; }
+  main { padding: 20px 28px; max-width: 1100px; margin: 0 auto; }
+
+  .upload-box {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin-bottom: 22px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .upload-box input[type="file"] { font-size: 13px; }
+  button {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  button:disabled { background: #999; cursor: default; }
+  button.secondary { background: #fff; color: var(--accent); border: 1px solid var(--accent); }
+  #uploadStatus { font-size: 13px; color: #666; }
+
+  table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13.5px; }
+  th { background: #f0f2f5; font-weight: 600; color: #444; }
+  tr:hover td { background: #f7f9fc; cursor: pointer; }
+
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+  .badge.rfq { background: var(--good-bg); color: var(--good-text); }
+  .badge.not-rfq { background: #eee; color: #666; }
+  .badge.warn { background: var(--warn-bg); color: #8a5a00; border: 1px solid var(--warn-border); }
+  .conf { font-variant-numeric: tabular-nums; color: #555; }
+
+  .empty { padding: 40px; text-align: center; color: #888; }
+
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.35);
+    display: flex; align-items: flex-start; justify-content: center;
+    padding: 40px 16px; overflow-y: auto;
+  }
+  .modal {
+    background: #fff; border-radius: 10px; max-width: 720px; width: 100%;
+    padding: 24px 28px; box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+  }
+  .modal h2 { margin-top: 0; font-size: 18px; }
+  .modal .close { float: right; cursor: pointer; color: #888; font-size: 20px; line-height: 1; }
+  .field-grid { display: grid; grid-template-columns: 140px 1fr; gap: 6px 12px; font-size: 13.5px; margin-bottom: 16px; }
+  .field-grid dt { color: #666; }
+  .field-grid dd { margin: 0; }
+  .warnings-box {
+    background: var(--warn-bg); border: 1px solid var(--warn-border); border-radius: 6px;
+    padding: 10px 14px; margin-bottom: 16px; font-size: 13px;
+  }
+  .warnings-box ul { margin: 6px 0 0; padding-left: 18px; }
+  .lineitems-table th, .lineitems-table td { font-size: 13px; padding: 6px 8px; }
+  .muted { color: #999; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>RFQ Ingestion Dashboard</h1>
+    <p>What came in — an operator's-eye view of ingested emails</p>
+  </div>
+  <button class="secondary" onclick="loadList()">Refresh</button>
+</header>
+
+<main>
+  <div class="upload-box">
+    <strong>Test /ingest:</strong>
+    <input type="file" id="fileInput" accept=".eml" />
+    <button onclick="uploadFile()">Ingest email</button>
+    <span id="uploadStatus"></span>
+  </div>
+
+  <table id="table">
+    <thead>
+      <tr>
+        <th>Received</th>
+        <th>File</th>
+        <th>Type</th>
+        <th>Customer</th>
+        <th>Priority</th>
+        <th>Due</th>
+        <th>Items</th>
+        <th>Confidence</th>
+        <th>Warnings</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+  <div id="emptyState" class="empty" style="display:none">
+    No RFQs ingested yet. Upload a .eml file above, or POST to /ingest.
+  </div>
+</main>
+
+<div id="modalRoot"></div>
+
+<script>
+async function loadList() {
+  const res = await fetch('/rfqs');
+  const rows = await res.json();
+  const tbody = document.getElementById('tbody');
+  const empty = document.getElementById('emptyState');
+  tbody.innerHTML = '';
+  if (rows.length === 0) {
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    tr.onclick = () => showDetail(r.id);
+    const received = new Date(r.receivedAt).toLocaleString();
+    const typeBadge = r.isRfq
+      ? '<span class="badge rfq">RFQ</span>'
+      : '<span class="badge not-rfq">not RFQ</span>';
+    const customer = r.customer
+      ? [r.customer.company, r.customer.name].filter(Boolean).join(' — ') || '<span class="muted">—</span>'
+      : '<span class="muted">—</span>';
+    const warnBadge = r.warningCount > 0
+      ? `<span class="badge warn">${r.warningCount} warning${r.warningCount > 1 ? 's' : ''}</span>`
+      : '<span class="muted">none</span>';
+    tr.innerHTML = `
+      <td>${received}</td>
+      <td>${r.filename}</td>
+      <td>${typeBadge}</td>
+      <td>${customer}</td>
+      <td>${r.priority || '<span class="muted">—</span>'}</td>
+      <td>${r.dueDate || '<span class="muted">—</span>'}</td>
+      <td>${r.isRfq ? r.lineItemCount : '<span class="muted">—</span>'}</td>
+      <td class="conf">${(r.confidence * 100).toFixed(0)}%</td>
+      <td>${warnBadge}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+async function uploadFile() {
+  const input = document.getElementById('fileInput');
+  const status = document.getElementById('uploadStatus');
+  if (!input.files.length) {
+    status.textContent = 'Choose a .eml file first.';
+    return;
+  }
+  status.textContent = 'Ingesting…';
+  const form = new FormData();
+  form.append('file', input.files[0]);
+  try {
+    const res = await fetch('/ingest', { method: 'POST', body: form });
+    if (!res.ok) throw new Error(await res.text());
+    status.textContent = 'Done.';
+    input.value = '';
+    await loadList();
+  } catch (e) {
+    status.textContent = 'Failed: ' + e.message;
+  }
+}
+
+async function showDetail(id) {
+  const res = await fetch(`/rfqs/${id}`);
+  const d = await res.json();
+  const root = document.getElementById('modalRoot');
+
+  let body;
+  if (d.isRfq) {
+    const c = d.customer || {};
+    const req = d.request || {};
+    const items = (d.lineItems || []).map(li => `
+      <tr>
+        <td>${li.partNumber}</td>
+        <td>${li.manufacturer || '<span class="muted">—</span>'}</td>
+        <td>${li.description || '<span class="muted">—</span>'}</td>
+        <td>${li.quantity}</td>
+        <td>${li.targetPrice != null ? '$' + li.targetPrice : '<span class="muted">—</span>'}</td>
+        <td>${li.notes || '<span class="muted">—</span>'}</td>
+      </tr>`).join('');
+    const warningsHtml = (d.warnings && d.warnings.length)
+      ? `<div class="warnings-box"><strong>⚠ Warnings for human review</strong><ul>${d.warnings.map(w => `<li>${w}</li>`).join('')}</ul></div>`
+      : '';
+    body = `
+      <dl class="field-grid">
+        <dt>Confidence</dt><dd>${(d.confidence * 100).toFixed(0)}%</dd>
+        <dt>Customer</dt><dd>${c.name || '<span class="muted">—</span>'} ${c.company ? '(' + c.company + ')' : ''}</dd>
+        <dt>Email</dt><dd>${c.email || '<span class="muted">—</span>'}</dd>
+        <dt>Phone</dt><dd>${c.phone || '<span class="muted">—</span>'}</dd>
+        <dt>Priority</dt><dd>${req.priority}</dd>
+        <dt>Due date</dt><dd>${req.dueDate || '<span class="muted">—</span>'}</dd>
+        <dt>Instructions</dt><dd>${req.specialInstructions || '<span class="muted">—</span>'}</dd>
+      </dl>
+      ${warningsHtml}
+      <table class="lineitems-table">
+        <thead><tr><th>Part #</th><th>Mfr</th><th>Description</th><th>Qty</th><th>Target $</th><th>Notes</th></tr></thead>
+        <tbody>${items || '<tr><td colspan="6" class="muted">No line items</td></tr>'}</tbody>
+      </table>
+    `;
+  } else {
+    body = `
+      <dl class="field-grid">
+        <dt>Confidence</dt><dd>${(d.confidence * 100).toFixed(0)}%</dd>
+        <dt>Reason</dt><dd>${d.reason}</dd>
+      </dl>
+    `;
+  }
+
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModal()">
+      <div class="modal">
+        <span class="close" onclick="closeModal()">&times;</span>
+        <h2>${d.filename}</h2>
+        ${body}
+      </div>
+    </div>
+  `;
+}
+
+function closeModal() {
+  document.getElementById('modalRoot').innerHTML = '';
+}
+
+loadList();
+</script>
+</body>
+</html>
