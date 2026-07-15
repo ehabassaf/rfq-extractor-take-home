@@ -24,6 +24,11 @@ def dashboard() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/architecture")
+def architecture() -> FileResponse:
+    return FileResponse(STATIC_DIR / "architecture.html")
+
+
 @app.post("/ingest")
 async def ingest(request: Request, file: Optional[UploadFile] = File(None)):
     """Accepts the contents of one email, either as a raw request body

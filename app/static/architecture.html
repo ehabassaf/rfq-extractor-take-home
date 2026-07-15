@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>RFQ Extractor — Architecture</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    margin: 0;
+    background: #fafafa;
+    color: #1a1a1a;
+  }
+  header {
+    padding: 20px 28px;
+    border-bottom: 1px solid #d9d9d9;
+    background: #fff;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  header h1 { font-size: 20px; margin: 0; }
+  header a { color: #2452b3; font-size: 13px; text-decoration: none; }
+  header a:hover { text-decoration: underline; }
+  main { padding: 24px 28px 60px; max-width: 900px; margin: 0 auto; }
+  h2 { font-size: 16px; margin-top: 32px; }
+  .mermaid { background: #fff; border: 1px solid #d9d9d9; border-radius: 8px; padding: 20px; margin: 12px 0; }
+  table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; margin: 12px 0; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #d9d9d9; font-size: 13.5px; vertical-align: top; }
+  th { background: #f0f2f5; font-weight: 600; color: #444; }
+  code { background: #eef0f3; padding: 1px 5px; border-radius: 4px; font-size: 0.92em; }
+  ul { padding-left: 20px; }
+  li { margin-bottom: 10px; font-size: 13.5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Architecture</h1>
+  <a href="/">&larr; Back to dashboard</a>
+</header>
+
+<main>
+  <h2>Request flow</h2>
+  <pre class="mermaid">
+flowchart TD
+    Browser["Browser&lt;br/&gt;dashboard (static/index.html)"]
+    Curl["curl / scripts/run_samples.py"]
+
+    Browser -- "GET /" --&gt; Main
+    Browser -- "GET /rfqs, /rfqs/{id}" --&gt; Main
+    Browser -- "POST /ingest (upload .eml)" --&gt; Main
+    Curl -- "POST /ingest (raw .eml)" --&gt; Main
+
+    subgraph Service["app/ (FastAPI)"]
+        Main["main.py&lt;br/&gt;routes"]
+        Parse["email_parse.py&lt;br/&gt;MIME walk + CSV/PDF decode&lt;br/&gt;(no LLM)"]
+        Extract["extract.py&lt;br/&gt;client.messages.parse()"]
+        Prompts["prompts.py&lt;br/&gt;system + user prompt"]
+        Verify["verify.py&lt;br/&gt;ground_check()"]
+        Store[("store.py&lt;br/&gt;in-memory list")]
+        Models["models.py&lt;br/&gt;Pydantic schema = the contract"]
+    end
+
+    Claude[("Anthropic API&lt;br/&gt;Claude Sonnet 5&lt;br/&gt;structured outputs")]
+
+    Main -- "raw bytes" --&gt; Parse
+    Parse -- "ParsedEmail&lt;br/&gt;(body + attachment text)" --&gt; Extract
+    Prompts -.-&gt;|"system prompt +&lt;br/&gt;untrusted-content wrapping"| Extract
+    Models -.-&gt;|"output_format=&lt;br/&gt;ExtractionWrapper"| Extract
+    Extract -- "structured request" --&gt; Claude
+    Claude -- "validated JSON&lt;br/&gt;(schema-enforced)" --&gt; Extract
+    Extract -- "RfqExtraction /&lt;br/&gt;NotRfqExtraction" --&gt; Verify
+    Models -.-&gt;|"same Pydantic&lt;br/&gt;types"| Verify
+    Verify -- "+ grounding warnings" --&gt; Store
+    Store -- "record" --&gt; Main
+    Main -- "JSON contract" --&gt; Browser
+    Main -- "JSON contract" --&gt; Curl
+  </pre>
+
+  <h2>What each piece does</h2>
+  <table>
+    <thead><tr><th style="width:160px">File</th><th>Responsibility</th></tr></thead>
+    <tbody>
+      <tr><td><code>main.py</code></td><td>FastAPI routes: <code>POST /ingest</code>, <code>GET /rfqs</code>, <code>GET /rfqs/{id}</code>, serves the dashboard and this page. Owns request/response wiring only — no parsing or LLM logic lives here.</td></tr>
+      <tr><td><code>email_parse.py</code></td><td>Deterministic, LLM-free. Walks the MIME tree, extracts the plain-text body, decodes CSV attachments to text and PDF attachments via <code>pypdf</code>. Flags image attachments as unreadable (no vision extraction in this build). Produces one <code>source_text</code> string used both as the model's input and as the corpus the verification pass checks against.</td></tr>
+      <tr><td><code>prompts.py</code></td><td>The system prompt (classification rules, extraction conventions for ambiguous cases, injection-resistance instructions) and the per-email user prompt that wraps the untrusted content in delimiters.</td></tr>
+      <tr><td><code>models.py</code></td><td>Pydantic models for the exact output contract (<code>Customer</code>, <code>RequestInfo</code>, <code>LineItem</code>, <code>RfqExtraction</code> / <code>NotRfqExtraction</code>). These aren't just validators — they're handed to the Anthropic API as the literal schema via structured outputs, so the model's response is guaranteed to match this shape.</td></tr>
+      <tr><td><code>extract.py</code></td><td>The single LLM call, via <code>client.messages.parse(output_format=ExtractionWrapper)</code>. Handles the three ways a call can go sideways (API error, safety refusal, schema mismatch) by degrading to a labeled <code>isRfq: false</code> result instead of raising. Falls back to a stub result if no API key is configured.</td></tr>
+      <tr><td><code>verify.py</code></td><td>Option A — the post-extraction grounding pass. Checks every line item's <code>partNumber</code> and non-zero <code>quantity</code> actually appear in <code>source_text</code>; appends a warning (never drops the item) on a miss. Catches hallucinated/mis-transcribed parts and is a second line of defense against the prompt-injection sample.</td></tr>
+      <tr><td><code>store.py</code></td><td>In-memory list of ingested results (no DB, per spec).</td></tr>
+      <tr><td><code>static/index.html</code></td><td>The dashboard — plain HTML/CSS/vanilla JS, no build step. Table view + detail modal + an upload box that calls <code>/ingest</code> directly.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Why it's built this way</h2>
+  <ul>
+    <li><strong>Structured outputs, not prompted JSON.</strong> <code>models.py</code> is the single source of truth for the contract; it's used both to constrain what the model can return and to validate what comes back. There's no "hope the model returns valid JSON" step.</li>
+    <li><strong>Defense in depth against untrusted input.</strong> The spec's <code>rfq-07</code> sample embeds a fake instruction trying to get the model to misclassify and hide real line items. Two independent layers catch this: the system prompt tells the model email content is data, never commands; and <code>verify.py</code> grounds every extracted line item in the source text regardless of what the model concluded.</li>
+    <li><strong>Every LLM failure mode degrades gracefully.</strong> API errors, safety refusals, and schema mismatches all produce a clearly-labeled <code>isRfq: false</code> with a <code>reason</code> — never an unhandled exception reaching the caller.</li>
+  </ul>
+</main>
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, securityLevel: "loose" });
+</script>
+</body>
+</html>
